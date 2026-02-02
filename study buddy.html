@@ -1,0 +1,604 @@
+import React, { useState, useEffect, useReducer } from 'react';
+import { Calendar, Plus, Upload, Trash2, Play, CheckCircle, Clock, Target, TrendingUp, Download, Zap, Award, Brain, Coffee, AlertCircle, ChevronRight, Star, Shield, Heart, Archive, Moon, Sun, RefreshCw, FileSpreadsheet, Edit, ExternalLink, Loader } from 'lucide-react';
+
+// State Management
+const initialState = {
+  courses: [],
+  sessions: [],
+  archive: [],
+  settings: {
+    dailyMinutes: 60,
+    lowEnergyMinutes: 15,
+    studyDays: [1, 2, 3, 4, 5],
+    startDate: new Date().toISOString().split('T')[0],
+    focusOneCourse: true,
+    strictMode: false,
+    theme: 'dark',
+    googleSheetUrl: '',
+    lastSync: null
+  }
+};
+
+function appReducer(state, action) {
+  switch (action.type) {
+    case 'SET_COURSES':
+      return { ...state, courses: action.payload };
+    case 'ADD_COURSE':
+      return { ...state, courses: [...state.courses, action.payload] };
+    case 'UPDATE_COURSE':
+      return { ...state, courses: state.courses.map(c => c.id === action.payload.id ? action.payload : c) };
+    case 'DELETE_COURSE':
+      return { ...state, courses: state.courses.filter(c => c.id !== action.payload) };
+    case 'SET_SESSIONS':
+      return { ...state, sessions: action.payload };
+    case 'UPDATE_SESSION':
+      return { ...state, sessions: state.sessions.map(s => s.id === action.payload.id ? action.payload : s) };
+    case 'ADD_TO_ARCHIVE':
+      return { ...state, archive: [...state.archive, action.payload] };
+    case 'UPDATE_SETTINGS':
+      return { ...state, settings: { ...state.settings, ...action.payload } };
+    default:
+      return state;
+  }
+}
+
+// Validation
+const validateCourse = (course) => {
+  const errors = {};
+  if (!course.name?.trim()) errors.name = 'Course name is required';
+  if (!course.totalHours || parseFloat(course.totalHours) <= 0) errors.totalHours = 'Must be a positive number';
+  if (course.deadline && new Date(course.deadline) < new Date()) errors.deadline = 'Cannot be in the past';
+  return Object.keys(errors).length > 0 ? errors : null;
+};
+
+// Sanitization
+const sanitize = (text) => text ? String(text).replace(/[<>"']/g, '') : '';
+
+// Components
+const Toast = ({ message, type, onClose }) => {
+  useEffect(() => {
+    const timer = setTimeout(onClose, 4000);
+    return () => clearTimeout(timer);
+  }, [onClose]);
+
+  const colors = { success: 'bg-green-600', error: 'bg-red-600', warning: 'bg-yellow-600', info: 'bg-blue-600' };
+  return (
+    <div className={`fixed top-20 left-1/2 transform -translate-x-1/2 z-50 ${colors[type]} text-white px-6 py-3 rounded-xl shadow-xl max-w-xl`}>
+      <p className="text-sm text-center">{message}</p>
+    </div>
+  );
+};
+
+const LoadingSpinner = () => <Loader className="w-6 h-6 animate-spin" />;
+
+const ConfirmDialog = ({ isOpen, title, message, onConfirm, onCancel, isDangerous }) => {
+  if (!isOpen) return null;
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50 p-4">
+      <div className="bg-gray-800 rounded-2xl p-6 max-w-md border border-gray-700">
+        <h3 className="text-xl font-bold text-white mb-3">{title}</h3>
+        <p className="text-gray-300 mb-6">{message}</p>
+        <div className="flex gap-3">
+          <button onClick={onCancel} className="flex-1 bg-gray-600 hover:bg-gray-700 text-white py-3 rounded-lg font-semibold">Cancel</button>
+          <button onClick={onConfirm} className={`flex-1 ${isDangerous ? 'bg-red-600 hover:bg-red-700' : 'bg-blue-600 hover:bg-blue-700'} text-white py-3 rounded-lg font-semibold`}>Confirm</button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const CourseTracker = () => {
+  const [state, dispatch] = useReducer(appReducer, initialState);
+  const [formData, setFormData] = useState({ name: '', url: '', totalHours: '', priority: 'medium', deadline: '', motivation: '' });
+  const [formErrors, setFormErrors] = useState({});
+  const [ui, setUi] = useState({ activeView: 'dashboard', showAddCourse: false, editingCourse: null, lowEnergyMode: false, isLoading: false, toast: null, confirmDialog: { isOpen: false } });
+
+  const { courses, sessions, archive, settings } = state;
+  const { activeView, showAddCourse, editingCourse, lowEnergyMode, isLoading, toast, confirmDialog } = ui;
+
+  const isDark = settings.theme === 'dark';
+  const textPrimary = isDark ? 'text-white' : 'text-gray-900';
+  const textSecondary = isDark ? 'text-gray-400' : 'text-gray-600';
+  const cardBg = isDark ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200';
+  const inputBg = isDark ? 'bg-gray-800 border-gray-600' : 'bg-white border-gray-300';
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('studyAssistantPro');
+      if (saved) {
+        const data = JSON.parse(saved);
+        dispatch({ type: 'SET_COURSES', payload: data.courses || [] });
+        dispatch({ type: 'SET_SESSIONS', payload: data.sessions || [] });
+        if (data.settings) dispatch({ type: 'UPDATE_SETTINGS', payload: data.settings });
+      }
+    } catch (error) {
+      console.error('Load error:', error);
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('studyAssistantPro', JSON.stringify({ courses, sessions, archive, settings }));
+    } catch (error) {
+      console.error('Save error:', error);
+    }
+  }, [courses, sessions, archive, settings]);
+
+  const showToast = (message, type = 'info') => setUi(prev => ({ ...prev, toast: { message, type } }));
+  const clearToast = () => setUi(prev => ({ ...prev, toast: null }));
+
+  const addCourse = () => {
+    const errors = validateCourse(formData);
+    if (errors) {
+      setFormErrors(errors);
+      showToast('Please fix the errors', 'error');
+      return;
+    }
+
+    const course = {
+      id: `manual-${Date.now()}`,
+      name: sanitize(formData.name),
+      url: formData.url,
+      totalHours: parseFloat(formData.totalHours),
+      priority: formData.priority,
+      deadline: formData.deadline,
+      motivation: sanitize(formData.motivation),
+      status: 'not started',
+      hoursCompleted: 0,
+      source: 'manual',
+      createdAt: new Date().toISOString()
+    };
+
+    dispatch({ type: 'ADD_COURSE', payload: course });
+    setFormData({ name: '', url: '', totalHours: '', priority: 'medium', deadline: '', motivation: '' });
+    setFormErrors({});
+    setUi(prev => ({ ...prev, showAddCourse: false }));
+    showToast('Course added successfully', 'success');
+  };
+
+  const startEdit = (course) => {
+    if (course.source === 'google-sheets') {
+      showToast('Edit in Google Sheets and sync', 'warning');
+      return;
+    }
+    setUi(prev => ({ ...prev, editingCourse: course }));
+    setFormData({
+      name: course.name,
+      url: course.url || '',
+      totalHours: course.totalHours.toString(),
+      priority: course.priority,
+      deadline: course.deadline || '',
+      motivation: course.motivation || ''
+    });
+  };
+
+  const saveEdit = () => {
+    const errors = validateCourse(formData);
+    if (errors) {
+      setFormErrors(errors);
+      showToast('Please fix the errors', 'error');
+      return;
+    }
+
+    dispatch({ type: 'UPDATE_COURSE', payload: {
+      ...editingCourse,
+      name: sanitize(formData.name),
+      url: formData.url,
+      totalHours: parseFloat(formData.totalHours),
+      priority: formData.priority,
+      deadline: formData.deadline,
+      motivation: sanitize(formData.motivation)
+    }});
+
+    setFormData({ name: '', url: '', totalHours: '', priority: 'medium', deadline: '', motivation: '' });
+    setFormErrors({});
+    setUi(prev => ({ ...prev, editingCourse: null }));
+    showToast('Course updated', 'success');
+  };
+
+  const deleteCourse = (id) => {
+    const course = courses.find(c => c.id === id);
+    setUi(prev => ({
+      ...prev,
+      confirmDialog: {
+        isOpen: true,
+        title: 'Delete Course?',
+        message: `Delete "${course.name}"? This cannot be undone.`,
+        isDangerous: true,
+        onConfirm: () => {
+          dispatch({ type: 'DELETE_COURSE', payload: id });
+          showToast('Course deleted', 'success');
+          setUi(prev => ({ ...prev, confirmDialog: { isOpen: false } }));
+        },
+        onCancel: () => setUi(prev => ({ ...prev, confirmDialog: { isOpen: false } }))
+      }
+    }));
+  };
+
+  const generateSchedule = () => {
+    if (courses.length === 0) {
+      showToast('Add courses first', 'warning');
+      return;
+    }
+
+    setUi(prev => ({ ...prev, isLoading: true }));
+
+    try {
+      const priorityOrder = { high: 1, medium: 2, low: 3 };
+      const activeCourses = courses.filter(c => c.status !== 'completed');
+      const sorted = [...activeCourses].sort((a, b) => priorityOrder[a.priority] - priorityOrder[b.priority]);
+
+      let newSessions = [];
+      let currentDate = new Date(settings.startDate);
+      const dailyHours = (lowEnergyMode ? settings.lowEnergyMinutes : settings.dailyMinutes) / 60;
+
+      if (settings.focusOneCourse && sorted.length > 0) {
+        const focus = sorted[0];
+        const remaining = focus.totalHours - focus.hoursCompleted;
+        const totalSessions = Math.ceil(remaining / dailyHours);
+        let hours = remaining;
+
+        for (let i = 0; i < totalSessions; i++) {
+          while (!settings.studyDays.includes(currentDate.getDay())) {
+            currentDate.setDate(currentDate.getDate() + 1);
+          }
+
+          newSessions.push({
+            id: `${focus.id}-${Date.now()}-${i}`,
+            courseId: focus.id,
+            courseName: focus.name,
+            date: currentDate.toISOString().split('T')[0],
+            duration: Math.min(dailyHours, hours),
+            completed: false
+          });
+
+          hours -= dailyHours;
+          currentDate.setDate(currentDate.getDate() + 1);
+        }
+
+        dispatch({ type: 'UPDATE_COURSE', payload: { ...focus, status: 'in progress' } });
+      }
+
+      dispatch({ type: 'SET_SESSIONS', payload: newSessions });
+      showToast(`${newSessions.length} sessions created`, 'success');
+    } catch (error) {
+      showToast('Failed to generate schedule', 'error');
+    } finally {
+      setUi(prev => ({ ...prev, isLoading: false }));
+    }
+  };
+
+  const completeSession = (sessionId) => {
+    const session = sessions.find(s => s.id === sessionId);
+    dispatch({ type: 'UPDATE_SESSION', payload: { ...session, completed: true } });
+
+    const completedHours = sessions.filter(s => s.courseId === session.courseId && (s.completed || s.id === sessionId)).reduce((sum, s) => sum + s.duration, 0);
+    const course = courses.find(c => c.id === session.courseId);
+    const isComplete = completedHours >= course.totalHours;
+
+    if (isComplete) {
+      dispatch({ type: 'ADD_TO_ARCHIVE', payload: { ...course, completedDate: new Date().toISOString().split('T')[0] } });
+      dispatch({ type: 'DELETE_COURSE', payload: course.id });
+      showToast(`🎉 Completed "${course.name}"!`, 'success');
+      setTimeout(generateSchedule, 1000);
+    } else {
+      dispatch({ type: 'UPDATE_COURSE', payload: { ...course, hoursCompleted: completedHours, status: 'in progress' } });
+      showToast('Session completed!', 'success');
+    }
+  };
+
+  const downloadTemplate = () => {
+    try {
+      const csv = [
+        ['Course Name', 'Course Link', 'Hours', 'Priority', 'Deadline', 'Motivation', 'ID'],
+        ['Example Course', 'https://example.com', '20', 'high', '2025-04-15', 'Career growth', 'ID1']
+      ].map(row => row.join(',')).join('\n');
+
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'course-template.csv';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      showToast('Template downloaded', 'success');
+    } catch (error) {
+      showToast('Download failed', 'error');
+    }
+  };
+
+  const today = new Date().toISOString().split('T')[0];
+  const todaySession = sessions.find(s => s.date === today && !s.completed);
+  const todayCourse = todaySession ? courses.find(c => c.id === todaySession.courseId) : null;
+
+  return (
+    <div className={`min-h-screen bg-gradient-to-br ${isDark ? 'from-gray-900 via-slate-900 to-gray-800' : 'from-blue-50 via-indigo-50 to-purple-50'} p-4 md:p-6`}>
+      {toast && <Toast message={toast.message} type={toast.type} onClose={clearToast} />}
+      <ConfirmDialog {...confirmDialog} />
+
+      {isLoading && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-40">
+          <div className="bg-gray-800 rounded-xl p-6 flex flex-col items-center">
+            <LoadingSpinner />
+            <p className="text-white mt-4">Loading...</p>
+          </div>
+        </div>
+      )}
+
+      <div className="max-w-7xl mx-auto">
+        <div className={`${cardBg} rounded-2xl shadow-2xl p-6 border`}>
+          <div className="flex items-center justify-between mb-6">
+            <div>
+              <h1 className={`text-3xl font-bold ${textPrimary}`}>Study Assistant Pro</h1>
+              <p className={textSecondary}>Production Ready v2.0</p>
+            </div>
+            <button onClick={() => dispatch({ type: 'UPDATE_SETTINGS', payload: { theme: isDark ? 'light' : 'dark' } })} className={`p-3 rounded-lg ${isDark ? 'bg-gray-700' : 'bg-gray-200'}`}>
+              {isDark ? <Sun className="w-5 h-5 text-yellow-400" /> : <Moon className="w-5 h-5" />}
+            </button>
+          </div>
+
+          <div className="flex gap-2 mb-6 overflow-x-auto pb-2">
+            {['dashboard', 'courses', 'schedule', 'sync', 'archive', 'settings'].map(view => (
+              <button key={view} onClick={() => setUi(prev => ({ ...prev, activeView: view }))} className={`px-4 py-2 rounded-lg whitespace-nowrap ${activeView === view ? 'bg-blue-600 text-white' : isDark ? 'bg-gray-700 text-gray-300' : 'bg-gray-200 text-gray-700'}`}>
+                {view.charAt(0).toUpperCase() + view.slice(1)}
+              </button>
+            ))}
+          </div>
+
+          {activeView === 'dashboard' && (
+            <div className="space-y-6">
+              {todaySession && todayCourse ? (
+                <div className="bg-gradient-to-br from-blue-600 to-purple-700 rounded-2xl p-6 border border-blue-500">
+                  <h2 className="text-2xl font-bold text-white mb-4">Today's Focus</h2>
+                  <div className="bg-white bg-opacity-10 rounded-xl p-4 mb-4">
+                    <h3 className="text-xl font-bold text-white mb-3">{todayCourse.name}</h3>
+                    <div className="grid grid-cols-3 gap-3 text-center">
+                      <div><p className="text-blue-200 text-xs">Duration</p><p className="text-white font-bold">{(todaySession.duration * 60).toFixed(0)} min</p></div>
+                      <div><p className="text-blue-200 text-xs">Progress</p><p className="text-white font-bold">{((todayCourse.hoursCompleted / todayCourse.totalHours) * 100).toFixed(0)}%</p></div>
+                      <div><p className="text-blue-200 text-xs">Remaining</p><p className="text-white font-bold">{(todayCourse.totalHours - todayCourse.hoursCompleted).toFixed(1)}h</p></div>
+                    </div>
+                  </div>
+                  <button onClick={() => completeSession(todaySession.id)} className="w-full bg-green-600 hover:bg-green-700 text-white px-6 py-3 rounded-xl font-bold flex items-center justify-center gap-2">
+                    <Play className="w-5 h-5" /> Complete Session
+                  </button>
+                </div>
+              ) : (
+                <div className={`${isDark ? 'bg-gray-700' : 'bg-gray-100'} rounded-xl p-8 text-center`}>
+                  <CheckCircle className="w-16 h-16 mx-auto text-green-400 mb-4" />
+                  <h3 className={`text-2xl font-bold ${textPrimary} mb-2`}>All Caught Up!</h3>
+                  <p className={textSecondary}>No sessions for today</p>
+                </div>
+              )}
+
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div className="bg-gradient-to-br from-blue-500 to-blue-600 rounded-xl p-4 text-white">
+                  <div className="flex items-center justify-between">
+                    <div><p className="text-blue-100 text-xs">Active</p><p className="text-2xl font-bold">{courses.length}</p></div>
+                    <Target className="w-8 h-8 opacity-80" />
+                  </div>
+                </div>
+                <div className="bg-gradient-to-br from-green-500 to-green-600 rounded-xl p-4 text-white">
+                  <div className="flex items-center justify-between">
+                    <div><p className="text-green-100 text-xs">Done</p><p className="text-2xl font-bold">{archive.length}</p></div>
+                    <CheckCircle className="w-8 h-8 opacity-80" />
+                  </div>
+                </div>
+                <div className="bg-gradient-to-br from-purple-500 to-purple-600 rounded-xl p-4 text-white">
+                  <div className="flex items-center justify-between">
+                    <div><p className="text-purple-100 text-xs">Streak</p><p className="text-2xl font-bold">{sessions.filter(s => s.completed).length}</p></div>
+                    <Zap className="w-8 h-8 opacity-80" />
+                  </div>
+                </div>
+                <div className="bg-gradient-to-br from-orange-500 to-orange-600 rounded-xl p-4 text-white">
+                  <div className="flex items-center justify-between">
+                    <div><p className="text-orange-100 text-xs">Hours</p><p className="text-2xl font-bold">{(courses.reduce((s, c) => s + c.hoursCompleted, 0) + archive.reduce((s, c) => s + c.totalHours, 0)).toFixed(1)}</p></div>
+                    <TrendingUp className="w-8 h-8 opacity-80" />
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeView === 'courses' && (
+            <div>
+              <div className="flex justify-between items-center mb-6">
+                <h2 className={`text-2xl font-bold ${textPrimary}`}>Courses</h2>
+                {!editingCourse && (
+                  <button onClick={() => setUi(prev => ({ ...prev, showAddCourse: !showAddCourse }))} className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold flex items-center gap-2">
+                    <Plus className="w-5 h-5" /> Add
+                  </button>
+                )}
+              </div>
+
+              {(showAddCourse || editingCourse) && (
+                <div className={`${isDark ? 'bg-gray-700' : 'bg-gray-100'} rounded-xl p-6 mb-6 border ${isDark ? 'border-gray-600' : 'border-gray-300'}`}>
+                  <h3 className={`font-bold ${textPrimary} mb-4`}>{editingCourse ? 'Edit' : 'Add'} Course</h3>
+                  <div className="space-y-3">
+                    <div>
+                      <input value={formData.name} onChange={(e) => setFormData({...formData, name: e.target.value})} placeholder="Course Name *" className={`w-full px-4 py-3 ${inputBg} rounded-lg ${textPrimary} ${formErrors.name ? 'border-red-500' : ''}`} />
+                      {formErrors.name && <p className="text-red-500 text-xs mt-1">{formErrors.name}</p>}
+                    </div>
+                    <input value={formData.url} onChange={(e) => setFormData({...formData, url: e.target.value})} placeholder="URL" className={`w-full px-4 py-3 ${inputBg} rounded-lg ${textPrimary}`} />
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <input value={formData.totalHours} onChange={(e) => setFormData({...formData, totalHours: e.target.value})} placeholder="Hours *" type="number" className={`w-full px-4 py-3 ${inputBg} rounded-lg ${textPrimary} ${formErrors.totalHours ? 'border-red-500' : ''}`} />
+                        {formErrors.totalHours && <p className="text-red-500 text-xs mt-1">{formErrors.totalHours}</p>}
+                      </div>
+                      <select value={formData.priority} onChange={(e) => setFormData({...formData, priority: e.target.value})} className={`w-full px-4 py-3 ${inputBg} rounded-lg ${textPrimary}`}>
+                        <option value="high">High</option>
+                        <option value="medium">Medium</option>
+                        <option value="low">Low</option>
+                      </select>
+                    </div>
+                    <div>
+                      <input value={formData.deadline} onChange={(e) => setFormData({...formData, deadline: e.target.value})} type="date" className={`w-full px-4 py-3 ${inputBg} rounded-lg ${textPrimary} ${formErrors.deadline ? 'border-red-500' : ''}`} />
+                      {formErrors.deadline && <p className="text-red-500 text-xs mt-1">{formErrors.deadline}</p>}
+                    </div>
+                    <textarea value={formData.motivation} onChange={(e) => setFormData({...formData, motivation: e.target.value})} placeholder="Why?" rows="2" className={`w-full px-4 py-3 ${inputBg} rounded-lg ${textPrimary}`} />
+                    <div className="flex gap-3">
+                      <button onClick={editingCourse ? saveEdit : addCourse} disabled={isLoading} className="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-3 rounded-lg font-semibold flex items-center justify-center gap-2 disabled:opacity-50">
+                        {isLoading ? <LoadingSpinner /> : editingCourse ? <CheckCircle className="w-5 h-5" /> : <Plus className="w-5 h-5" />}
+                        {editingCourse ? 'Save' : 'Add'}
+                      </button>
+                      <button onClick={() => {
+                        setFormData({ name: '', url: '', totalHours: '', priority: 'medium', deadline: '', motivation: '' });
+                        setFormErrors({});
+                        setUi(prev => ({ ...prev, showAddCourse: false, editingCourse: null }));
+                      }} className={`px-6 py-3 ${isDark ? 'bg-gray-600' : 'bg-gray-300'} rounded-lg font-semibold`}>Cancel</button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <div className="space-y-4">
+                {courses.map(course => (
+                  <div key={course.id} className={`${isDark ? 'bg-gray-700' : 'bg-white'} border ${isDark ? 'border-gray-600' : 'border-gray-300'} rounded-xl p-6`}>
+                    <div className="flex items-start justify-between mb-4">
+                      <div className="flex-1">
+                        <h3 className={`text-xl font-bold ${textPrimary}`}>{course.name}</h3>
+                        {course.url && <a href={course.url} target="_blank" rel="noopener noreferrer" className="text-sm text-blue-400 hover:underline">{course.url}</a>}
+                      </div>
+                      <div className="flex gap-2">
+                        {course.source === 'manual' && <button onClick={() => startEdit(course)} className="p-2 text-blue-400 hover:bg-blue-900 rounded-lg"><Edit className="w-4 h-4" /></button>}
+                        <button onClick={() => deleteCourse(course.id)} className="p-2 text-red-400 hover:bg-red-900 rounded-lg"><Trash2 className="w-4 h-4" /></button>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-3 gap-4 text-sm mb-4">
+                      <div><p className={textSecondary}>Total</p><p className={`font-semibold ${textPrimary}`}>{course.totalHours}h</p></div>
+                      <div><p className={textSecondary}>Progress</p><p className="font-semibold text-green-400">{((course.hoursCompleted / course.totalHours) * 100).toFixed(0)}%</p></div>
+                      <div><p className={textSecondary}>Deadline</p><p className={`font-semibold ${textPrimary}`}>{course.deadline || 'None'}</p></div>
+                    </div>
+                    <div className={`w-full ${isDark ? 'bg-gray-600' : 'bg-gray-300'} rounded-full h-3`}>
+                      <div className="bg-gradient-to-r from-blue-500 to-purple-500 h-3 rounded-full" style={{ width: `${(course.hoursCompleted / course.totalHours) * 100}%` }}></div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {activeView === 'schedule' && (
+            <div>
+              <div className="flex justify-between items-center mb-6">
+                <h2 className={`text-2xl font-bold ${textPrimary}`}>Schedule</h2>
+                <button onClick={generateSchedule} disabled={isLoading} className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold flex items-center gap-2 disabled:opacity-50">
+                  {isLoading ? <LoadingSpinner /> : <RefreshCw className="w-5 h-5" />} Generate
+                </button>
+              </div>
+              {sessions.length === 0 ? (
+                <div className={`text-center py-12 ${isDark ? 'bg-gray-700' : 'bg-gray-100'} rounded-xl`}>
+                  <Calendar className="w-16 h-16 mx-auto text-gray-500 mb-4" />
+                  <p className={textSecondary}>No schedule yet</p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {sessions.map(session => (
+                    <div key={session.id} className={`border rounded-xl p-4 ${session.completed ? isDark ? 'bg-green-900 border-green-700' : 'bg-green-100 border-green-300' : isDark ? 'bg-gray-700 border-gray-600' : 'bg-white border-gray-300'}`}>
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <p className={`font-bold ${textPrimary}`}>{session.courseName}</p>
+                          <p className={`text-sm ${textSecondary}`}>{session.date} • {(session.duration * 60).toFixed(0)} min</p>
+                        </div>
+                        {!session.completed && session.date === today && (
+                          <button onClick={() => completeSession(session.id)} className="px-4 py-2 bg-green-600 text-white rounded-lg">Complete</button>
+                        )}
+                        {session.completed && <CheckCircle className="w-5 h-5 text-green-400" />}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeView === 'sync' && (
+            <div className="space-y-6">
+              <h2 className={`text-2xl font-bold ${textPrimary}`}>Google Sheets Sync</h2>
+              <div className={`${isDark ? 'bg-blue-900 border-blue-700' : 'bg-blue-50 border-blue-200'} rounded-xl p-6 border`}>
+                <h3 className={`font-bold ${textPrimary} mb-3`}>Download Template</h3>
+                <button onClick={downloadTemplate} className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold flex items-center gap-2">
+                  <Download className="w-5 h-5" /> Download CSV Template
+                </button>
+              </div>
+              <div className={`${isDark ? 'bg-green-900 border-green-700' : 'bg-green-50 border-green-200'} rounded-xl p-6 border`}>
+                <h3 className={`font-bold ${textPrimary} mb-3`}>Connect Sheet</h3>
+                <input type="text" placeholder="Paste Google Sheets URL..." value={settings.googleSheetUrl} onChange={(e) => dispatch({ type: 'UPDATE_SETTINGS', payload: { googleSheetUrl: e.target.value } })} className={`w-full px-4 py-3 ${inputBg} rounded-lg ${textPrimary}`} />
+                <p className={`text-xs ${textSecondary} mt-2`}>Note: Real API integration coming soon. Template download works now.</p>
+              </div>
+            </div>
+          )}
+
+          {activeView === 'archive' && (
+            <div>
+              <h2 className={`text-2xl font-bold mb-6 ${textPrimary}`}>Completed Courses</h2>
+              {archive.length === 0 ? (
+                <div className={`text-center py-12 ${isDark ? 'bg-gray-700' : 'bg-gray-100'} rounded-xl`}>
+                  <Award className="w-16 h-16 mx-auto text-gray-500 mb-4" />
+                  <p className={textSecondary}>No completed courses yet</p>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {archive.map(course => (
+                    <div key={course.id} className={`${isDark ? 'bg-gradient-to-r from-green-900 to-emerald-900 border-green-700' : 'bg-gradient-to-r from-green-100 to-emerald-100 border-green-300'} border rounded-xl p-6`}>
+                      <div className="flex items-start gap-4">
+                        <Star className="w-10 h-10 text-yellow-400 flex-shrink-0" />
+                        <div>
+                          <h4 className={`text-xl font-bold ${textPrimary}`}>{course.name}</h4>
+                          <p className={`text-sm ${textSecondary}`}>Completed: {course.completedDate} • {course.totalHours}h invested</p>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeView === 'settings' && (
+            <div className="max-w-2xl mx-auto space-y-6">
+              <h2 className={`text-2xl font-bold mb-6 ${textPrimary}`}>Settings</h2>
+              <div className={`${isDark ? 'bg-gray-700 border-gray-600' : 'bg-gray-100 border-gray-300'} rounded-xl p-6 border`}>
+                <label className={`block text-sm font-semibold mb-2 ${textPrimary}`}>Daily Study Time (minutes)</label>
+                <input type="number" value={settings.dailyMinutes} onChange={(e) => dispatch({ type: 'UPDATE_SETTINGS', payload: { dailyMinutes: parseInt(e.target.value) } })} className={`w-full px-4 py-2 ${inputBg} rounded-lg ${textPrimary}`} />
+              </div>
+              <div className={`${isDark ? 'bg-gray-700 border-gray-600' : 'bg-gray-100 border-gray-300'} rounded-xl p-6 border`}>
+                <label className={`block text-sm font-semibold mb-2 ${textPrimary}`}>Low Energy Duration (minutes)</label>
+                <input type="number" value={settings.lowEnergyMinutes} onChange={(e) => dispatch({ type: 'UPDATE_SETTINGS', payload: { lowEnergyMinutes: parseInt(e.target.value) } })} className={`w-full px-4 py-2 ${inputBg} rounded-lg ${textPrimary}`} />
+              </div>
+              <div className={`${isDark ? 'bg-gray-700 border-gray-600' : 'bg-gray-100 border-gray-300'} rounded-xl p-6 border`}>
+                <label className={`block text-sm font-semibold mb-4 ${textPrimary}`}>Study Days</label>
+                <div className="flex gap-2 flex-wrap">
+                  {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((day, idx) => (
+                    <button key={idx} onClick={() => {
+                      const newDays = settings.studyDays.includes(idx) ? settings.studyDays.filter(d => d !== idx) : [...settings.studyDays, idx];
+                      dispatch({ type: 'UPDATE_SETTINGS', payload: { studyDays: newDays } });
+                    }} className={`px-4 py-2 rounded-lg font-semibold ${settings.studyDays.includes(idx) ? 'bg-blue-600 text-white' : isDark ? 'bg-gray-600 text-gray-300' : 'bg-gray-300 text-gray-700'}`}>
+                      {day}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className={`${isDark ? 'bg-gray-700 border-gray-600' : 'bg-gray-100 border-gray-300'} rounded-xl p-6 border`}>
+                <label className={`block text-sm font-semibold mb-2 ${textPrimary}`}>Start Date</label>
+                <input type="date" value={settings.startDate} onChange={(e) => dispatch({ type: 'UPDATE_SETTINGS', payload: { startDate: e.target.value } })} className={`w-full px-4 py-2 ${inputBg} rounded-lg ${textPrimary}`} />
+              </div>
+              <div className={`${isDark ? 'bg-gray-700 border-gray-600' : 'bg-gray-100 border-gray-300'} rounded-xl p-6 border`}>
+                <label className="flex items-center gap-3">
+                  <input type="checkbox" checked={settings.focusOneCourse} onChange={(e) => dispatch({ type: 'UPDATE_SETTINGS', payload: { focusOneCourse: e.target.checked } })} className="w-5 h-5" />
+                  <div>
+                    <span className={`${textPrimary} font-semibold`}>Focus on One Course</span>
+                    <p className={`text-xs ${textSecondary}`}>Complete courses sequentially</p>
+                  </div>
+                </label>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default CourseTracker;
